@@ -1,30 +1,60 @@
-# from sqlalchemy import create_engine
-# from sqlalchemy.orm import sessionmaker
-# import os
-# from sqlalchemy import create_engine
-# # Create SQLAlchemy engine
-# engine = create_engine('sqlite:///abdalla.db')
-# SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-
-# def get_db():
-#     db = SessionLocal()
-#     try:
-#         yield db
-#     finally:
-#         db.close()
-
-
 from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import sessionmaker, scoped_session
 import os
+from sqlalchemy.pool import QueuePool
+import logging
 
-# Create SQLAlchemy engine
-engine = create_engine('sqlite:///abdalla.db')
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Database URL - can be configured via environment variable
+DATABASE_URL = os.environ.get('DATABASE_URL', 'sqlite:///abdalla.db')
+
+# Create engine with connection pooling
+engine = create_engine(
+    DATABASE_URL,
+    poolclass=QueuePool,
+    pool_size=10,
+    max_overflow=20,
+    pool_timeout=30,
+    pool_recycle=3600,  # Recycle connections after 1 hour
+    connect_args={'check_same_thread': False} if DATABASE_URL.startswith('sqlite') else {}
+)
+
+# Create session factory
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
+# Create scoped session for thread safety
+ScopedSession = scoped_session(SessionLocal)
+
 def get_db():
-    db = SessionLocal()
+    """
+    Get a database session.
+    Usage:
+        db = next(get_db())
+    """
+    db = ScopedSession()
     try:
         yield db
     finally:
         db.close()
+
+def get_db_context():
+    """
+    Get a database session as a context manager.
+    Usage:
+        with get_db_context() as db:
+            # use db here
+    """
+    db = ScopedSession()
+    try:
+        yield db
+    finally:
+        db.close()
+
+def init_db():
+    """Initialize the database with tables"""
+    from models import Base
+    Base.metadata.create_all(bind=engine)
+    logger.info("Database initialized with tables")
