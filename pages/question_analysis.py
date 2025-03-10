@@ -6,6 +6,8 @@ import llm_utils
 import logging
 from datetime import datetime
 import os
+from groq import Groq
+import json
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -42,225 +44,401 @@ analysis_option = st.radio(
     ["Analyze Existing Question", "Analyze New Question"]
 )
 
-if analysis_option == "Analyze Existing Question":
-    # Get courses from database
-    db = next(get_db())
-    courses = db.query(Course).all()
+def analyze_question_with_ai(question_content, question_type):
+    """
+    Analyze a question using the Groq API.
     
-    if not courses:
-        st.info("No courses found. Please add a course first.")
-        st.stop()
+    Args:
+        question_content: The content of the question
+        question_type: The type of question (Multiple Choice, Essay, etc.)
+        
+    Returns:
+        A dictionary with analysis results
+    """
+    try:
+        # Check if Groq API key is set
+        api_key = os.environ.get("GROQ_API_KEY")
+        if not api_key:
+            show_error("Groq API key not found. Please set the GROQ_API_KEY environment variable.")
+            logger.error("Groq API key not found")
+            return None
+        
+        # Initialize Groq client
+        client = Groq(api_key=api_key)
+        
+        # Create prompt for analysis
+        prompt = f"""
+        You are an expert in educational assessment. Please analyze the following question:
+        
+        Question: {question_content}
+        Question Type: {question_type}
+        
+        Provide the following analysis:
+        1. Difficulty rating (1-5 scale, where 1 is easiest and 5 is hardest)
+        2. Estimated time to answer (in minutes)
+        3. Appropriate student level (Beginner, Intermediate, Advanced)
+        4. Suggested improvements to the question
+        5. Relevant tags for categorizing this question
+        
+        Format your response as a JSON object with the following keys:
+        difficulty, estimated_time, student_level, improvements, tags
+        """
+        
+        # Call Groq API
+        with st.spinner("Analyzing question with AI..."):
+            response = client.chat.completions.create(
+                model="llama-3.1-8b-instant",
+                messages=[
+                    {"role": "system", "content": "You are an expert in educational assessment."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.2,
+                max_tokens=1000
+            )
+        
+        # Extract and parse JSON response
+        response_text = response.choices[0].message.content
+        
+        # Find JSON in the response
+        start_idx = response_text.find('{')
+        end_idx = response_text.rfind('}') + 1
+        
+        if start_idx >= 0 and end_idx > start_idx:
+            json_str = response_text[start_idx:end_idx]
+            analysis = json.loads(json_str)
+            return analysis
+        else:
+            # Try to extract structured data if JSON parsing fails
+            analysis = {}
+            if "difficulty" in response_text:
+                try:
+                    difficulty_line = [line for line in response_text.split('\n') if "difficulty" in line.lower()][0]
+                    analysis["difficulty"] = float(difficulty_line.split(':')[1].strip().split()[0])
+                except:
+                    analysis["difficulty"] = 3.0
+            
+            if "estimated_time" in response_text:
+                try:
+                    time_line = [line for line in response_text.split('\n') if "estimated_time" in line.lower()][0]
+                    analysis["estimated_time"] = int(time_line.split(':')[1].strip().split()[0])
+                except:
+                    analysis["estimated_time"] = 5
+            
+            if "student_level" in response_text:
+                try:
+                    level_line = [line for line in response_text.split('\n') if "student_level" in line.lower()][0]
+                    analysis["student_level"] = level_line.split(':')[1].strip()
+                except:
+                    analysis["student_level"] = "Intermediate"
+            
+            if "improvements" in response_text:
+                try:
+                    improvements_section = response_text.split("improvements")[1].split("tags")[0]
+                    analysis["improvements"] = improvements_section.strip()
+                except:
+                    analysis["improvements"] = "No specific improvements suggested."
+            
+            if "tags" in response_text:
+                try:
+                    tags_section = response_text.split("tags")[1].strip()
+                    analysis["tags"] = tags_section.strip()
+                except:
+                    analysis["tags"] = "education, assessment"
+            
+            return analysis
     
-    # Course selection
-    selected_course = st.selectbox(
-        "Select Course",
-        options=[(c.id, c.title) for c in courses],
-        format_func=lambda x: x[1]
-    )
+    except Exception as e:
+        logger.error(f"Error analyzing question with AI: {str(e)}")
+        show_error(f"Error analyzing question: {str(e)}")
+        return None
+
+def show_question_analysis():
+    """Display the question analysis page."""
+    st.markdown("## Question Analysis")
     
-    # Get chapters for selected course
-    chapters = db.query(Chapter).filter(Chapter.course_id == selected_course[0]).all()
+    # Check if Groq API key is set
+    api_key = os.environ.get("GROQ_API_KEY")
+    if not api_key:
+        st.error("""
+        Groq API key not found. Please set the GROQ_API_KEY environment variable.
+        
+        1. Get an API key from https://console.groq.com/
+        2. Add it to your .env file: GROQ_API_KEY=your_api_key_here
+        3. Restart the application
+        """)
+        return
     
-    if not chapters:
-        st.info(f"No chapters found for course '{selected_course[1]}'. Please add a chapter first.")
-        st.stop()
+    # Check if analyzing an existing question
+    if "analyzing_question_id" in st.session_state:
+        question_id = st.session_state.analyzing_question_id
+        analyze_existing_question(question_id)
+        return
     
-    # Chapter selection
-    selected_chapter = st.selectbox(
-        "Select Chapter",
-        options=[(c.id, c.title) for c in chapters],
-        format_func=lambda x: x[1]
-    )
+    # Tabs for analyzing existing vs new questions
+    tab1, tab2 = st.tabs(["Analyze Existing Question", "Analyze New Question"])
     
-    # Get questions for selected chapter
-    questions = db.query(Question).filter(Question.chapter_id == selected_chapter[0]).all()
+    with tab1:
+        analyze_existing_question_tab()
     
-    if not questions:
-        st.info(f"No questions found for chapter '{selected_chapter[1]}'. Please add a question first.")
-        st.stop()
+    with tab2:
+        analyze_new_question_tab()
+
+def analyze_existing_question(question_id):
+    """Analyze an existing question by ID."""
+    try:
+        db = next(get_db())
+        
+        # Get question details
+        question = db.query(Question).get(question_id)
+        
+        if not question:
+            show_error("Question not found.")
+            return
+        
+        # Display question details
+        st.markdown("### Question Details")
+        st.write(f"**Content:** {question.content}")
+        st.write(f"**Type:** {question.question_type}")
+        st.write(f"**Current Difficulty:** {question.difficulty}/5")
+        st.write(f"**Current Estimated Time:** {question.estimated_time} minutes")
+        st.write(f"**Current Student Level:** {question.student_level}")
+        
+        # Button to analyze
+        if st.button("Analyze with AI"):
+            analysis = analyze_question_with_ai(question.content, question.question_type)
+            
+            if analysis:
+                st.markdown("### AI Analysis Results")
+                
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Suggested Difficulty", f"{analysis.get('difficulty', 3.0)}/5", 
+                             delta=round(analysis.get('difficulty', 3.0) - question.difficulty, 1))
+                with col2:
+                    st.metric("Suggested Time", f"{analysis.get('estimated_time', 5)} min", 
+                             delta=analysis.get('estimated_time', 5) - question.estimated_time)
+                with col3:
+                    st.metric("Suggested Level", analysis.get('student_level', 'Intermediate'))
+                
+                st.markdown("### Suggested Improvements")
+                st.write(analysis.get('improvements', 'No specific improvements suggested.'))
+                
+                st.markdown("### Suggested Tags")
+                st.write(analysis.get('tags', 'No specific tags suggested.'))
+                
+                # Update question button
+                if st.button("Update Question with AI Suggestions"):
+                    try:
+                        question.difficulty = analysis.get('difficulty', question.difficulty)
+                        question.estimated_time = analysis.get('estimated_time', question.estimated_time)
+                        question.student_level = analysis.get('student_level', question.student_level)
+                        question.tags = analysis.get('tags', question.tags)
+                        
+                        db.commit()
+                        show_success("Question updated successfully with AI suggestions!")
+                    except Exception as e:
+                        logger.error(f"Error updating question: {str(e)}")
+                        show_error(f"Error updating question: {str(e)}")
+        
+        # Button to go back
+        if st.button("Back to Question Bank"):
+            st.session_state.pop("analyzing_question_id", None)
+            st.rerun()
     
-    # Question selection
-    selected_question = st.selectbox(
-        "Select Question",
-        options=[(q.id, q.content[:50] + "..." if len(q.content) > 50 else q.content) for q in questions],
-        format_func=lambda x: x[1]
-    )
+    except Exception as e:
+        logger.error(f"Error analyzing existing question: {str(e)}")
+        show_error(f"Error: {str(e)}")
+
+def analyze_existing_question_tab():
+    """Tab for analyzing existing questions."""
+    st.markdown("### Select a Question to Analyze")
     
-    # Get selected question details
-    question = db.query(Question).filter(Question.id == selected_question[0]).first()
-    chapter = db.query(Chapter).filter(Chapter.id == question.chapter_id).first()
-    course = db.query(Course).filter(Course.id == chapter.course_id).first()
+    try:
+        db = next(get_db())
+        
+        # Get courses for filtering
+        courses = db.query(Course).all()
+        
+        if not courses:
+            st.info("No courses found. Please add a course first.")
+            return
+        
+        # Course selection
+        selected_course = st.selectbox(
+            "Select Course",
+            options=[(0, "All Courses")] + [(c.id, c.title) for c in courses],
+            format_func=lambda x: x[1]
+        )
+        
+        # Get chapters based on selected course
+        if selected_course[0] == 0:
+            chapters = db.query(Chapter).all()
+        else:
+            chapters = db.query(Chapter).filter_by(course_id=selected_course[0]).all()
+        
+        if not chapters:
+            st.info("No chapters found for the selected course.")
+            return
+        
+        # Chapter selection
+        selected_chapter = st.selectbox(
+            "Select Chapter",
+            options=[(0, "All Chapters")] + [(c.id, c.title) for c in chapters],
+            format_func=lambda x: x[1]
+        )
+        
+        # Get questions based on filters
+        query = db.query(Question)
+        
+        if selected_chapter[0] != 0:
+            query = query.filter_by(chapter_id=selected_chapter[0])
+        elif selected_course[0] != 0:
+            query = query.join(Chapter).filter(Chapter.course_id == selected_course[0])
+        
+        questions = query.all()
+        
+        if not questions:
+            st.info("No questions found for the selected filters.")
+            return
+        
+        # Question selection
+        selected_question = st.selectbox(
+            "Select Question",
+            options=[(q.id, q.content[:100] + "..." if len(q.content) > 100 else q.content) for q in questions],
+            format_func=lambda x: x[1]
+        )
+        
+        # Button to analyze
+        if st.button("Analyze Selected Question"):
+            st.session_state.analyzing_question_id = selected_question[0]
+            st.rerun()
     
-    # Display question details
-    st.subheader("Question Details")
-    st.write(f"**Course:** {course.title}")
-    st.write(f"**Chapter:** {chapter.title}")
-    st.write(f"**Question Type:** {question.question_type or 'Not specified'}")
-    st.write(f"**Current Difficulty:** {question.difficulty}")
-    st.write(f"**Question Content:**")
-    st.write(question.content)
+    except Exception as e:
+        logger.error(f"Error in analyze_existing_question_tab: {str(e)}")
+        show_error(f"Error: {str(e)}")
+
+def analyze_new_question_tab():
+    """Tab for analyzing new questions."""
+    st.markdown("### Create and Analyze a New Question")
     
-    # Display ILOs
-    st.subheader("Intended Learning Outcomes (ILOs)")
-    if chapter.ilos:
-        st.write(chapter.ilos)
-    else:
-        st.write("No ILOs specified for this chapter.")
-    
-    # Analyze button
-    if st.button("Analyze Question"):
-        with st.spinner("Analyzing question with AI... This may take a few moments."):
-            try:
-                # Call LLM to analyze question
-                difficulty_rating, improvement_suggestions = llm_utils.analyze_question(
-                    question_content=question.content,
-                    question_type=question.question_type or "Unknown",
-                    course_title=course.title,
-                    chapter_title=chapter.title,
-                    ilos=chapter.ilos or "Not specified"
+    try:
+        db = next(get_db())
+        
+        # Get courses
+        courses = db.query(Course).all()
+        
+        if not courses:
+            st.info("No courses found. Please add a course first.")
+            return
+        
+        # Course selection
+        selected_course = st.selectbox(
+            "Select Course",
+            options=[(c.id, c.title) for c in courses],
+            format_func=lambda x: x[1],
+            key="new_question_course"
+        )
+        
+        # Get chapters for selected course
+        chapters = db.query(Chapter).filter_by(course_id=selected_course[0]).all()
+        
+        if not chapters:
+            st.info("No chapters found for the selected course. Please add a chapter first.")
+            return
+        
+        # Chapter selection
+        selected_chapter = st.selectbox(
+            "Select Chapter",
+            options=[(c.id, c.title) for c in chapters],
+            format_func=lambda x: x[1],
+            key="new_question_chapter"
+        )
+        
+        # Question content
+        question_content = st.text_area("Question Content", height=150)
+        
+        # Question type
+        question_type = st.selectbox(
+            "Question Type",
+            options=["Multiple Choice", "True/False", "Essay", "Short Answer"]
+        )
+        
+        # Button to analyze
+        if st.button("Analyze New Question") and question_content:
+            analysis = analyze_question_with_ai(question_content, question_type)
+            
+            if analysis:
+                st.markdown("### AI Analysis Results")
+                
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Suggested Difficulty", f"{analysis.get('difficulty', 3.0)}/5")
+                with col2:
+                    st.metric("Suggested Time", f"{analysis.get('estimated_time', 5)} min")
+                with col3:
+                    st.metric("Suggested Level", analysis.get('student_level', 'Intermediate'))
+                
+                st.markdown("### Suggested Improvements")
+                st.write(analysis.get('improvements', 'No specific improvements suggested.'))
+                
+                st.markdown("### Suggested Tags")
+                st.write(analysis.get('tags', 'No specific tags suggested.'))
+                
+                # Store analysis in session state
+                st.session_state.new_question_analysis = analysis
+                st.session_state.new_question_content = question_content
+                st.session_state.new_question_type = question_type
+                st.session_state.new_question_chapter_id = selected_chapter[0]
+                
+                # Option to edit question based on suggestions
+                edited_content = st.text_area(
+                    "Edit Question Based on Suggestions",
+                    value=question_content,
+                    height=150
                 )
                 
-                if difficulty_rating is not None:
-                    st.subheader("Analysis Results")
-                    
-                    # Display difficulty rating
-                    st.write(f"**AI-Suggested Difficulty Rating:** {difficulty_rating}")
-                    
-                    # Compare with current difficulty
-                    if abs(difficulty_rating - question.difficulty) > 0.5:
-                        st.warning(f"The AI-suggested difficulty rating differs significantly from the current rating ({question.difficulty}).")
-                    
-                    # Option to update difficulty
-                    if st.button("Update Difficulty Rating"):
-                        question.difficulty = difficulty_rating
-                        db.commit()
-                        show_success(f"Difficulty rating updated to {difficulty_rating}.")
-                
-                # Display improvement suggestions
-                if improvement_suggestions:
-                    st.subheader("Improvement Suggestions")
-                    st.write(improvement_suggestions)
-                else:
-                    st.error("Failed to generate improvement suggestions. Please try again.")
-            except Exception as e:
-                st.error(f"Error analyzing question: {str(e)}")
-                logger.error(f"Error analyzing question: {str(e)}")
-
-else:  # Analyze New Question
-    # Get courses from database
-    db = next(get_db())
-    courses = db.query(Course).all()
-    
-    if not courses:
-        st.info("No courses found. Please add a course first.")
-        st.stop()
-    
-    # Course selection
-    selected_course = st.selectbox(
-        "Select Course",
-        options=[(c.id, c.title) for c in courses],
-        format_func=lambda x: x[1]
-    )
-    
-    # Get chapters for selected course
-    chapters = db.query(Chapter).filter(Chapter.course_id == selected_course[0]).all()
-    
-    if not chapters:
-        st.info(f"No chapters found for course '{selected_course[1]}'. Please add a chapter first.")
-        st.stop()
-    
-    # Chapter selection
-    selected_chapter = st.selectbox(
-        "Select Chapter",
-        options=[(c.id, c.title) for c in chapters],
-        format_func=lambda x: x[1]
-    )
-    
-    # Get selected chapter details
-    chapter = db.query(Chapter).filter(Chapter.id == selected_chapter[0]).first()
-    course = db.query(Course).filter(Course.id == chapter.course_id).first()
-    
-    # Display ILOs
-    st.subheader("Intended Learning Outcomes (ILOs)")
-    if chapter.ilos:
-        st.write(chapter.ilos)
-    else:
-        st.write("No ILOs specified for this chapter.")
-    
-    # Question input form
-    st.subheader("New Question")
-    question_type = st.selectbox(
-        "Question Type",
-        options=["Multiple Choice", "True/False", "Essay", "Short Answer"]
-    )
-    question_content = st.text_area("Question Content", height=150)
-    
-    # Analyze button
-    if st.button("Analyze Question"):
-        if not question_content.strip():
-            show_error("Please enter question content.")
-        else:
-            with st.spinner("Analyzing question with AI... This may take a few moments."):
-                try:
-                    # Call LLM to analyze question
-                    difficulty_rating, improvement_suggestions = llm_utils.analyze_question(
-                        question_content=question_content,
-                        question_type=question_type,
-                        course_title=course.title,
-                        chapter_title=chapter.title,
-                        ilos=chapter.ilos or "Not specified"
-                    )
-                    
-                    if difficulty_rating is not None:
-                        st.subheader("Analysis Results")
-                        st.write(f"**AI-Suggested Difficulty Rating:** {difficulty_rating}")
-                    
-                    # Display improvement suggestions
-                    if improvement_suggestions:
-                        st.subheader("Improvement Suggestions")
-                        st.write(improvement_suggestions)
-                    else:
-                        st.error("Failed to generate improvement suggestions. Please try again.")
-                    
-                    # Option to add question with suggested difficulty
-                    if difficulty_rating is not None:
-                        add_col1, add_col2 = st.columns(2)
-                        with add_col1:
-                            if st.button("Add Question with Suggested Difficulty"):
-                                # Create new question
-                                new_question = Question(
-                                    chapter_id=chapter.id,
-                                    content=question_content,
-                                    difficulty=difficulty_rating,
-                                    question_type=question_type,
-                                    student_level="Intermediate",  # Default value
-                                    created_at=datetime.utcnow(),
-                                    updated_at=datetime.utcnow()
-                                )
-                                
-                                try:
-                                    db.add(new_question)
-                                    db.commit()
-                                    show_success("Question added successfully with AI-suggested difficulty rating.")
-                                    
-                                    # Clear form
-                                    question_content = ""
-                                    st.rerun()
-                                except Exception as e:
-                                    db.rollback()
-                                    show_error(f"Error adding question: {str(e)}")
+                # Add question button
+                if st.button("Add Question to Database"):
+                    try:
+                        # Create new question
+                        new_question = Question(
+                            chapter_id=selected_chapter[0],
+                            content=edited_content,
+                            difficulty=analysis.get('difficulty', 3.0),
+                            estimated_time=analysis.get('estimated_time', 5),
+                            student_level=analysis.get('student_level', 'Intermediate'),
+                            question_type=question_type,
+                            tags=analysis.get('tags', ''),
+                            correct_answer="",
+                            explanation=""
+                        )
                         
-                        with add_col2:
-                            # Add option to modify question based on suggestions before adding
-                            if st.button("Edit Question Before Adding"):
-                                st.session_state["editing_question_content"] = question_content
-                                st.session_state["editing_question_type"] = question_type
-                                st.session_state["editing_question_difficulty"] = difficulty_rating
-                                st.session_state["editing_question_chapter_id"] = chapter.id
-                                st.rerun()
-                except Exception as e:
-                    st.error(f"Error analyzing question: {str(e)}")
-                    logger.error(f"Error analyzing question: {str(e)}")
+                        db.add(new_question)
+                        db.commit()
+                        
+                        show_success("Question added successfully!")
+                        
+                        # Clear session state
+                        st.session_state.pop("new_question_analysis", None)
+                        st.session_state.pop("new_question_content", None)
+                        st.session_state.pop("new_question_type", None)
+                        st.session_state.pop("new_question_chapter_id", None)
+                        
+                        st.rerun()
+                    except Exception as e:
+                        logger.error(f"Error adding question: {str(e)}")
+                        show_error(f"Error adding question: {str(e)}")
+        elif not question_content and st.button("Analyze New Question"):
+            show_error("Please enter question content.")
+    
+    except Exception as e:
+        logger.error(f"Error in analyze_new_question_tab: {str(e)}")
+        show_error(f"Error: {str(e)}")
+
+# For backward compatibility - this will be called when the file is run directly
+if __name__ == "__main__":
+    st.title("Question Analysis")
+    show_question_analysis()
 
 # If editing a question before adding
 if "editing_question_content" in st.session_state:

@@ -178,22 +178,38 @@ def paginate_data(items: List[Any], items_per_page: int = 10, key: str = None) -
     total_items = len(items)
     total_pages = (total_items + items_per_page - 1) // items_per_page
     
-    # Add pagination controls
-    col1, col2, col3 = st.columns([1, 2, 1])
-    with col2:
-        page = st.number_input(
-            "Page", 
-            min_value=1, 
-            max_value=max(1, total_pages), 
-            value=1,
-            key=f"pagination_{key}" if key else f"pagination_{id(items)}"
-        )
+    # Get current page from session state
+    page_key = f"pagination_{key}" if key else f"pagination_{id(items)}"
+    if page_key not in st.session_state:
+        st.session_state[page_key] = 1
     
     # Get items for current page
+    page = st.session_state[page_key]
     start = (page - 1) * items_per_page
     end = min(start + items_per_page, total_items)
     
-    return items[start:end]
+    # Get the items for the current page
+    current_page_items = items[start:end]
+    
+    # Add pagination controls at the bottom
+    if total_pages > 1:
+        st.markdown("---")  # Add a separator
+        cols = st.columns([2, 1, 2, 1, 2])
+        
+        # Previous page button
+        if cols[0].button("← Previous", key=f"{page_key}_prev", disabled=(page <= 1)):
+            st.session_state[page_key] = max(1, page - 1)
+            st.rerun()
+        
+        # Page number display
+        cols[2].markdown(f"<div style='text-align: center; margin-top: 5px;'>Page {page} of {total_pages}</div>", unsafe_allow_html=True)
+        
+        # Next page button
+        if cols[4].button("Next →", key=f"{page_key}_next", disabled=(page >= total_pages)):
+            st.session_state[page_key] = min(total_pages, page + 1)
+            st.rerun()
+    
+    return current_page_items
 
 def rerun():
     """Rerun the app using meta refresh."""

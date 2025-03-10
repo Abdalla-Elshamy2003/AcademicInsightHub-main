@@ -3,6 +3,7 @@ from sqlalchemy.orm import sessionmaker, scoped_session
 import os
 from sqlalchemy.pool import QueuePool
 import logging
+import streamlit as st
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -55,6 +56,12 @@ def get_db_context():
 
 def init_db():
     """Initialize the database with tables"""
-    from models import Base
-    Base.metadata.create_all(bind=engine)
-    logger.info("Database initialized with tables")
+    # Use Streamlit's session state to track if DB has been initialized
+    if 'db_initialized' not in st.session_state:
+        from models import Base
+        Base.metadata.create_all(bind=engine)
+        logger.info("Database initialized with tables")
+        # Set flag to prevent repeated initialization
+        st.session_state['db_initialized'] = True
+    else:
+        logger.debug("Database already initialized, skipping")
